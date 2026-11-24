@@ -9,8 +9,17 @@ scheduler, the rate limiter, CSRF protection and SecurityBundle, Twig 3.30 or la
 
 With Symfony Flex, the recipe registers the bundle, writes `config/packages/phil_newsletter.yaml` with the site's base
 address and one sender profile, imports the routes under `/newsletter` in `config/routes/phil_newsletter.yaml`, and
-adds `NEWSLETTER_SECRET` to `.env`: give it a random value of 32 bytes or more in production. Without Flex, register
-the bundle:
+adds `NEWSLETTER_SECRET` to `.env`, empty: give it a random value of 32 bytes or more, out of the repository — a
+Symfony secret, `.env.local`, or the environment of the server:
+
+```sh
+php -r 'echo bin2hex(random_bytes(32)), PHP_EOL;'
+php bin/console secrets:set NEWSLETTER_SECRET
+```
+
+The bundle refuses a key shorter than 16 bytes — an empty one among them — and one that begins with `change-me` or
+`changeme`, the placeholders examples use: the first service that signs a link, tags a VERP address or hashes a
+suppressed address fails with `LinkRefused`. Without Flex, register the bundle:
 
 ```php
 // config/bundles.php
@@ -41,7 +50,22 @@ phil_newsletter:
 
 `NewsletterSchema::configure()` adds the tables to a schema. With the ORM, `NewsletterSchemaListener`, registered on
 its `postGenerateSchema` event when DoctrineBundle is there, adds them to the schema it generates, and
-`doctrine:migrations:diff` writes the migration. See [Storage](storage.md).
+`doctrine:migrations:diff` writes the migration, and the one of each later version. See [Storage](storage.md).
+
+## The approvers
+
+A campaign is sent once a user of `ROLE_NEWSLETTER_APPROVER` approved it. Give the role to the people who approve, in
+the application's security:
+
+```yaml
+# config/packages/security.yaml
+security:
+    role_hierarchy:
+        ROLE_EDITOR_IN_CHIEF: [ROLE_NEWSLETTER_APPROVER]
+```
+
+`approval.role` names another role, `approval.four_eyes` asks for an approver other than the author, and
+`approval.required: false` sends without approval. See [Campaigns](campaigns.md#approval).
 
 ## The workers
 
@@ -67,6 +91,19 @@ php bin/console messenger:consume newsletter scheduler_newsletter
 
 A transport whose delays are short — a message waiting for the next opening of a send window may wait days — is
 fine: the delivery stays queued, and a later message picks it up.
+
+The handlers of `SendDelivery` and `SendConfirmation` send through Symfony Mailer's transports
+(`mailer.transports`), never through `MailerInterface`: they already run in a worker, and with `SendEmailMessage`
+routed to a transport, each email would wait in a second queue with the subscriber's address and its signed
+confirmation or unsubscription link. Through the transports, those messages carry identifiers only, and a refusal of
+the transport fails the handler: Messenger sees it and retries the message, a delivery marked failed in the meantime.
+The sender profile's `X-Transport`, the pace of `SendThrottle`, `List-Unsubscribe` and `List-Unsubscribe-Post` are
+applied as before, and so is the mailer's configuration — `envelope`, `headers`.
+
+Routing `SendEmailMessage` stays the application's choice for its own emails. An application that does keeps
+personal information in its Messenger transport and in its failure transport: it needs a retention rule for the
+failure transport — `messenger:failed:show` to look, `messenger:failed:remove` to purge — and a word in its privacy
+policy.
 
 ## The Markdown editor
 

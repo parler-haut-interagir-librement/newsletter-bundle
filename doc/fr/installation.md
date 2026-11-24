@@ -1,4 +1,4 @@
-<!-- phil-dev source-sha256=4ca9a394d4da04cffa7c09af6628888479dabf11d938c7debec023d0909169a7 -->
+<!-- phil-dev source-sha256=b7e2c7a487df5c214cba2f3065cc8aef700076a813ffd74bf59bd1a480c9188e -->
 # Installation
 
 ```sh
@@ -11,8 +11,17 @@ TwigBundle, le mailer, Messenger, le planificateur, le limiteur de débit, la pr
 
 Avec Symfony Flex, la recette enregistre le bundle, écrit `config/packages/phil_newsletter.yaml` avec l'adresse de base
 du site et un profil d'expéditeur, importe les routes sous `/newsletter` dans `config/routes/phil_newsletter.yaml` et
-ajoute `NEWSLETTER_SECRET` à `.env` : donnez-lui en production une valeur aléatoire de 32 octets ou plus. Sans Flex,
-enregistrez le bundle :
+ajoute `NEWSLETTER_SECRET` à `.env`, vide : donnez-lui une valeur aléatoire de 32 octets ou plus, hors du dépôt — un
+secret Symfony, `.env.local` ou l'environnement du serveur :
+
+```sh
+php -r 'echo bin2hex(random_bytes(32)), PHP_EOL;'
+php bin/console secrets:set NEWSLETTER_SECRET
+```
+
+Le bundle refuse une clé de moins de 16 octets — une clé vide comprise — et une clé qui commence par `change-me` ou
+`changeme`, les substituts qu'emploient les exemples : le premier service qui signe un lien, étiquette une adresse VERP
+ou hache une adresse supprimée échoue avec `LinkRefused`. Sans Flex, enregistrez le bundle :
 
 ```php
 // config/bundles.php
@@ -43,7 +52,22 @@ phil_newsletter:
 
 `NewsletterSchema::configure()` ajoute les tables à un schéma. Avec l'ORM, `NewsletterSchemaListener`, enregistré sur
 son événement `postGenerateSchema` quand DoctrineBundle est là, les ajoute au schéma qu'il génère, et
-`doctrine:migrations:diff` écrit la migration. Voir [Stockage](storage.md).
+`doctrine:migrations:diff` écrit la migration, et celle de chaque version suivante. Voir [Stockage](storage.md).
+
+## Les approbateurs
+
+Une campagne part une fois qu'un utilisateur de `ROLE_NEWSLETTER_APPROVER` l'a approuvée. Donnez le rôle aux personnes
+qui approuvent, dans la sécurité de l'application :
+
+```yaml
+# config/packages/security.yaml
+security:
+    role_hierarchy:
+        ROLE_EDITOR_IN_CHIEF: [ROLE_NEWSLETTER_APPROVER]
+```
+
+`approval.role` nomme un autre rôle, `approval.four_eyes` exige un approbateur autre que l'auteur, et
+`approval.required: false` envoie sans approbation. Voir [Campagnes](campaigns.md#approbation).
 
 ## Les *workers*
 
@@ -70,6 +94,19 @@ php bin/console messenger:consume newsletter scheduler_newsletter
 
 Un transport dont les délais sont courts convient — un message qui attend la prochaine ouverture d'une fenêtre d'envoi
 peut attendre des jours : l'envoi reste en file, et un message ultérieur le reprend.
+
+Les gestionnaires de `SendDelivery` et de `SendConfirmation` envoient par les transports de Symfony Mailer
+(`mailer.transports`), jamais par `MailerInterface` : ils s'exécutent déjà dans un *worker*, et avec `SendEmailMessage`
+acheminé vers un transport, chaque courriel attendrait dans une seconde file avec l'adresse de l'abonné et son lien
+signé de confirmation ou de désabonnement. Par les transports, ces messages ne portent que des identifiants, et un refus
+du transport fait échouer le gestionnaire : Messenger le voit et retente le message, une livraison étant entre-temps
+marquée en échec. Le `X-Transport` du profil d'expéditeur, le rythme de `SendThrottle`, `List-Unsubscribe` et
+`List-Unsubscribe-Post` s'appliquent comme avant, tout comme la configuration du mailer — `envelope`, `headers`.
+
+Acheminer `SendEmailMessage` reste le choix de l'application pour ses propres courriels. Celle qui le fait garde des
+renseignements personnels dans son transport Messenger et dans sa file des échecs : il lui faut une règle de
+conservation pour la file des échecs — `messenger:failed:show` pour regarder, `messenger:failed:remove` pour purger — et
+un mot dans sa politique de confidentialité.
 
 ## L'éditeur Markdown
 

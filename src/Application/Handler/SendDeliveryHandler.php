@@ -12,6 +12,7 @@ use Phil\NewsletterBundle\Application\Message\SendDelivery;
 use Phil\NewsletterBundle\Application\NewsletterUrls;
 use Phil\NewsletterBundle\Application\Sending\MessageComposer;
 use Phil\NewsletterBundle\Application\Sending\SenderProfiles;
+use Phil\NewsletterBundle\Application\SendRuns;
 use Phil\NewsletterBundle\Application\SignedLinks;
 use Phil\NewsletterBundle\Application\Tracking\ClickTracker;
 use Phil\NewsletterBundle\Domain\Contract\CampaignRepository;
@@ -23,6 +24,8 @@ use Phil\NewsletterBundle\Domain\Contract\TemplateRepository;
 use Phil\NewsletterBundle\Domain\Enum\CampaignStatus;
 use Phil\NewsletterBundle\Domain\Enum\ClickTracking;
 use Phil\NewsletterBundle\Domain\Enum\LinkPurpose;
+use Phil\NewsletterBundle\Domain\Enum\SendRunCounter;
+use Phil\NewsletterBundle\Domain\Enum\SendRunStatus;
 use Phil\NewsletterBundle\Domain\Enum\SubscriberStatus;
 use Phil\NewsletterBundle\Domain\Model\Campaign;
 use Phil\NewsletterBundle\Domain\Model\Delivery;
@@ -32,16 +35,22 @@ use Phil\NewsletterBundle\Domain\Model\Subscriber;
 use Phil\NewsletterBundle\Domain\Model\Template;
 use Psr\Clock\ClockInterface;
 use Symfony\Component\Mailer\Exception\TransportExceptionInterface;
-use Symfony\Component\Mailer\MailerInterface;
+use Symfony\Component\Mailer\Transport\TransportInterface;
 use Symfony\Component\Messenger\Attribute\AsMessageHandler;
 use Symfony\Component\Messenger\MessageBusInterface;
 use Symfony\Component\Messenger\Stamp\DelayStamp;
 
 /**
- * Sends one queued message, at its time. The subscriber is checked again first: one who left the list, paused,
- * bounced or complained since the message was queued is skipped. Outside the profile's send window, or past its pace
- * for the recipient's domain or its daily ceiling, the message is sent again later with a delay. A transport failure
- * leaves the delivery to retry and is thrown for Messenger's retries.
+ * Sends one queued message, at its time. The message of a paused send run is held, left queued until an operator
+ * resumes the run, and the message of a cancelled run is skipped. The subscriber is checked again first: one who left
+ * the list, paused, bounced or complained since the message was queued is skipped. Outside the profile's send window,
+ * or past its pace for the recipient's domain or its daily ceiling, the message is sent again later with a delay. A
+ * transport failure leaves the delivery to retry and is thrown for Messenger's retries. What became of the message is
+ * counted in its send run.
+ *
+ * The email goes through Symfony Mailer's transports, never `MailerInterface`: with `SendEmailMessage` routed to a
+ * Messenger transport, the address and the signed unsubscription link would wait in a second queue, and a refusal
+ * would be seen there rather than by this handler.
  */
 #[AsMessageHandler]
 final readonly class SendDeliveryHandler
@@ -60,9 +69,10 @@ final readonly class SendDeliveryHandler
         private ClickTracker $clicks,
         private SignedLinks $links,
         private NewsletterUrls $urls,
-        private MailerInterface $mailer,
+        private TransportInterface $transport,
         private MessageBusInterface $bus,
         private ClockInterface $clock,
+        private ?SendRuns $runs = null,
     ) {
     }
 
@@ -74,14 +84,19 @@ final readonly class SendDeliveryHandler
             return;
         }
 
+        $run = $this->runs?->status($delivery->runId);
+
+        if (SendRunStatus::Paused === $run) {
+            return;
+        }
+
         $now = $this->clock->now();
         $subscriber = $this->subscribers->get($delivery->subscriberId);
         $campaign = null === $delivery->campaignId ? null : $this->campaigns->get($delivery->campaignId);
         $list = $campaign instanceof Campaign ? $this->lists->get($campaign->listId) : null;
 
-        if (!$subscriber instanceof Subscriber || !$this->mayReceive($subscriber, $campaign, $list, $now)) {
-            $delivery->skipped();
-            $this->deliveries->save($delivery);
+        if (SendRunStatus::Cancelled === $run || !$subscriber instanceof Subscriber || !$this->mayReceive($subscriber, $campaign, $list, $now)) {
+            $this->skip($delivery);
 
             return;
         }
@@ -106,23 +121,24 @@ final readonly class SendDeliveryHandler
         $rendered = $this->render($delivery, $subscriber, $campaign, $list, $unsubscribe);
 
         if (!$rendered instanceof RenderedMessage) {
-            $delivery->skipped();
-            $this->deliveries->save($delivery);
+            $this->skip($delivery);
 
             return;
         }
 
         try {
-            $this->mailer->send($this->composer->compose($delivery->id, $subscriber, $profile, $rendered, $unsubscribe, $list, $campaign instanceof Campaign));
+            $this->transport->send($this->composer->compose($delivery->id, $subscriber, $profile, $rendered, $unsubscribe, $list, $campaign instanceof Campaign));
         } catch (TransportExceptionInterface $transportException) {
             $delivery->failed();
             $this->deliveries->save($delivery);
+            $this->runs?->record($delivery->runId, SendRunCounter::Failed);
 
             throw $transportException;
         }
 
         $delivery->sent($this->clock->now());
         $this->deliveries->save($delivery);
+        $this->runs?->record($delivery->runId, SendRunCounter::Sent);
 
         if (SubscriberStatus::Paused === $subscriber->status) {
             $subscriber->resume();
@@ -166,6 +182,13 @@ final readonly class SendDeliveryHandler
         $template = null === $delivery->template ? null : $this->templates->find($subscriber->site, $delivery->template);
 
         return $template instanceof Template ? $this->renderer->template($template, $context) : null;
+    }
+
+    private function skip(Delivery $delivery): void
+    {
+        $delivery->skipped();
+        $this->deliveries->save($delivery);
+        $this->runs?->record($delivery->runId, SendRunCounter::Skipped);
     }
 
     private function later(Delivery $delivery, int $seconds): void

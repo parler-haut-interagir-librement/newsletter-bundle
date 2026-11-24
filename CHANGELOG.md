@@ -4,6 +4,77 @@ All notable changes to `phil/newsletter-bundle` will be documented in this file.
 
 Updates should follow the [Keep a CHANGELOG](https://keepachangelog.com/) principles.
 
+## 0.4.0-alpha - 2026-11-24
+
+A campaign is sent once approved, by default, and the tables gain a table, columns and
+an index. See [Upgrading to 0.3](doc/campaigns.md#upgrading-to-03).
+
+### Added
+
+- Approval before sending: `approval.required`, on by default, `approval.role` (`ROLE_NEWSLETTER_APPROVER`) and
+  `approval.four_eyes`; `Campaigns::approve()` and `withdrawApproval()`, `Campaign::approve()`, `withdrawApproval()`
+  and `isApproved()`, the author of a campaign, `CampaignApproval` with who approved it and when, `ApprovalPolicy`,
+  `ApprovalRefused` and the event `CampaignApproved`. An edit of a campaign withdraws its approval; a scheduled
+  campaign whose time has come waits for its approval.
+- Send runs: `SendRun`, one per attempt at sending a campaign, its number, state, counts — queued, sent, failed,
+  skipped, bounced, complained — and dates, `SendRunStatus`, `SendRunCounter`, the port `SendRunRepository` and
+  `DbalSendRunRepository` on the table `phil_newsletter_send_run`, and `SendRuns`, whose counts each worker adds to in
+  one statement; each delivery of a campaign names its run, and no run sends twice to one recipient.
+- The circuit breaker of a send run, `circuit_breaker`, on by default: `BreakerPolicy` pauses a run once, of at least
+  `minimum` messages tried since it started or was resumed, the share of complaints, bounces or transport failures
+  passes its threshold, and dispatches `SendRunPaused` with its `PauseReason`; `SendRuns::resume()` by an operator
+  queues again what the run holds and dispatches `SendRunResumed`; `pause()` and `cancel()` for an operator, and
+  `SendRunCompleted` once every message of a run was sent or skipped. A paused run holds its messages, queued.
+- `DeliveryRepository::countOfRun()`, `pendingOfRun()` and `skipPendingOfRun()`.
+- The migration from the tables of 0.2, tested on MySQL 8.4 and PostgreSQL 17 from tables holding rows.
+- `TextPart`, the Mime `HtmlToTextConverterInterface` that writes the text part of a message from its HTML, the
+  address of every web link between angle brackets after its words, the head, the styles and what is hidden left out,
+  with a fuzz target.
+
+### Changed
+
+- `NewsletterSchema::configure()` adds the columns and the regular indexes the tables of the newsletter lack, besides
+  the tables a schema lacks: the comparison of the schema introspected with the schema configured is the migration.
+- `Campaign::start()` refuses a campaign that awaits its approval, unless it is told approval is not required;
+  `Campaigns::sendNow()` starts a send run and names it in `SendCampaign`.
+- `Campaigns` takes the `SendRuns`, then an optional `ApprovalPolicy`, authorization checker, token storage and event
+  dispatcher; `SendCampaignHandler` takes the `SendRuns` and whether approval is required; `SendDeliveryHandler` and
+  `BounceHandler` take the `SendRuns` as their last, optional argument.
+- The development requirements accept `phil/privacy-bundle` 0.3 and `phil/standard-webhooks-bundle` 0.2, the minor
+  versions of their main branches and no earlier one, so that the package installs on its own beside those bundles.
+- `SendDeliveryHandler` and `SendConfirmationHandler` take a Mailer `TransportInterface`, the service
+  `mailer.transports`, instead of `MailerInterface`.
+- `ContentRenderer` draws the text part with `TextPart` instead of Mime's `DefaultHtmlToTextConverter`, and no longer
+  decodes the entities of what its converter returns.
+- Requires the latest minor of each dependency (`doctrine/dbal` 4.6, `twig/twig` 3.31, `phil/markup` 0.3,
+  `symfony/event-dispatcher-contracts` 3.8, …), and of each development requirement (`doctrine/orm` 3.8,
+  `doctrine/doctrine-bundle` 3.4).
+
+### Security
+
+- A campaign message or a confirmation no longer goes through `MailerInterface`, which put a second message on the bus
+  when the application routed `SendEmailMessage`: the subscriber's address and the signed confirmation or
+  unsubscription link waited in the Messenger transport and its failure transport. The handlers send through the
+  Mailer transports, and a refusal of the transport fails the handler, for Messenger to retry its message, which
+  carries identifiers only.
+- The text part of a campaign, a confirmation or a message of a template keeps the address of each link: the
+  unsubscription, the preference center and the confirmation of a double opt-in were only in the `href` of the HTML,
+  so that a reader of the text part had no way to unsubscribe or confirm.
+- Every message carries a `TrackingHeader` that turns off the mail provider's open and click tracking: a provider that
+  tracks by default no longer adds a pixel per recipient nor rewrites the links, the signed ones included, through its
+  own domain; `ClickTracker` alone counts the clicks of a campaign.
+- The keys of the VERP tags and of the suppression hashes were derived from `secret` when the container was built,
+  before an environment variable or `%kernel.secret%` had its value: they were an HMAC of the placeholder the
+  configuration held, a value anyone could compute, which changed with the parameters of the application. A forged
+  bounce could pass the VERP check, and the hashes of the forgotten addresses stopped matching after a change of
+  parameters. `NewsletterKey::derive()` builds them from the value of `secret` at run time. Bounces of messages sent
+  before the update no longer pass the VERP check, and a forgotten address that bounced or complained before it may
+  subscribe again; a site whose `secret` was a literal value keeps its keys.
+- The Flex recipe wrote into `.env` an example value of `NEWSLETTER_SECRET`: a site that kept it signed its links, its
+  VERP tags and its suppression hashes with a key known to everyone. The recipe writes the variable empty, with a
+  comment on how to fill it, and `NewsletterKey::check()`, which `SignedLinks` calls, refuses a key that begins with
+  `change-me` or `changeme`, as it refuses one shorter than 16 bytes.
+
 ## 0.3.0-alpha - 2026-11-20
 
 The public subscription form is limited by default, so that a post accepted before may

@@ -8,10 +8,14 @@ use DateTimeImmutable;
 use Doctrine\DBAL\Connection;
 use Override;
 use Phil\NewsletterBundle\Application\Campaigns;
+use Phil\NewsletterBundle\Application\Exception\ApprovalRefused;
+use Phil\NewsletterBundle\Application\SendRuns;
 use Phil\NewsletterBundle\Domain\Contract\CampaignRepository;
 use Phil\NewsletterBundle\Domain\Contract\MailingListRepository;
 use Phil\NewsletterBundle\Domain\Contract\SubscriberRepository;
 use Phil\NewsletterBundle\Domain\Enum\MembershipStatus;
+use Phil\NewsletterBundle\Domain\Enum\SendRunCounter;
+use Phil\NewsletterBundle\Domain\Enum\SendRunStatus;
 use Phil\NewsletterBundle\Domain\Enum\SubscriberStatus;
 use Phil\NewsletterBundle\Domain\Model\Campaign;
 use Phil\NewsletterBundle\Domain\Model\MailingList;
@@ -30,7 +34,11 @@ use Symfony\Bundle\FrameworkBundle\Test\WebTestCase;
 use Symfony\Component\Cache\Adapter\AdapterInterface;
 use Symfony\Component\DomCrawler\Field\ChoiceFormField;
 use Symfony\Component\HttpKernel\KernelInterface;
+use Symfony\Component\Messenger\Transport\InMemory\InMemoryTransport;
 use Symfony\Component\Mime\Email;
+use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorageInterface;
+use Symfony\Component\Security\Core\Authentication\Token\UsernamePasswordToken;
+use Symfony\Component\Security\Core\User\InMemoryUser;
 
 /**
  * The bundle in an application: the subscription form and its CSRF token, the double opt-in through Messenger and the
@@ -93,6 +101,7 @@ final class NewsletterBundleTest extends WebTestCase
         $email = self::getMailerMessage();
         self::assertInstanceOf(Email::class, $email);
         self::assertSame('Confirm your subscription to News', $email->getSubject());
+        $this->assertNothingQueued();
         self::assertSame(1, preg_match('#https://example\.com(/newsletter/confirm/[A-Za-z0-9_.-]+)#', (string) $email->getHtmlBody(), $link));
 
         $crawler = $this->client->request('GET', $link[1]);
@@ -166,14 +175,30 @@ final class NewsletterBundleTest extends WebTestCase
     {
         $crawler = $this->client->request('GET', '/newsletter/subscribe/events');
         $this->client->submit($crawler->selectButton('Subscribe')->form(['email' => 'ada@example.com']));
-        $campaign = new Campaign('c1', Site::default(), 'l2', 'Hello', '[Read](https://example.org/read)');
+        $campaign = new Campaign('c1', Site::default(), 'l2', 'Hello', '[Read](https://example.org/read)', author: 'admin');
         $this->service(CampaignRepository::class)->save($campaign);
+
+        $this->signIn('admin', 'ROLE_ADMIN', 'ROLE_NEWSLETTER_APPROVER');
+
+        try {
+            $this->service(Campaigns::class)->approve($campaign);
+            self::fail('Under the four-eyes rule, the author does not approve.');
+        } catch (ApprovalRefused) {
+            self::assertFalse($campaign->isApproved());
+        }
+
+        $this->signIn('editor', 'ROLE_NEWSLETTER_APPROVER');
+        $this->service(Campaigns::class)->approve($campaign);
+        self::assertSame('editor', $this->service(CampaignRepository::class)->get('c1')?->approval?->approver);
 
         $this->service(Campaigns::class)->sendNow($campaign);
         self::assertEmailCount(1);
+        [$run] = $this->service(SendRuns::class)->ofCampaign('c1');
+        self::assertSame([SendRunStatus::Completed, 1, 1], [$run->status, $run->queued, $run->count(SendRunCounter::Sent)]);
         $email = self::getMailerMessage();
         self::assertInstanceOf(Email::class, $email);
         self::assertStringStartsWith('bounces+', (string) $email->getReturnPath()?->getAddress());
+        $this->assertNothingQueued();
         self::assertSame(1, preg_match('#https://example\.com(/newsletter/c/[A-Za-z0-9_.-]+)#', (string) $email->getHtmlBody(), $click));
 
         $this->client->request('GET', $click[1]);
@@ -199,8 +224,10 @@ final class NewsletterBundleTest extends WebTestCase
     {
         $crawler = $this->client->request('GET', '/newsletter/subscribe/events');
         $this->client->submit($crawler->selectButton('Subscribe')->form(['email' => 'ada@example.com']));
-        $campaign = new Campaign('c1', Site::default(), 'l2', 'Hello', 'Hi');
+        $campaign = new Campaign('c1', Site::default(), 'l2', 'Hello', 'Hi', author: 'admin');
         $this->service(CampaignRepository::class)->save($campaign);
+        $this->signIn('editor', 'ROLE_NEWSLETTER_APPROVER');
+        $this->service(Campaigns::class)->approve($campaign);
         $this->service(Campaigns::class)->sendNow($campaign);
         $email = self::getMailerMessage();
         self::assertInstanceOf(Email::class, $email);
@@ -262,6 +289,13 @@ final class NewsletterBundleTest extends WebTestCase
         return $subscriber;
     }
 
+    private function signIn(string $user, string ...$roles): void
+    {
+        $tokens = self::getContainer()->get('security.token_storage');
+        self::assertInstanceOf(TokenStorageInterface::class, $tokens);
+        $tokens->setToken(new UsernamePasswordToken(new InMemoryUser($user, null, array_values($roles)), 'main', array_values($roles)));
+    }
+
     /**
      * @template T of object
      *
@@ -275,5 +309,17 @@ final class NewsletterBundleTest extends WebTestCase
         self::assertInstanceOf($id, $service);
 
         return $service;
+    }
+
+    /**
+     * The handlers send through the Mailer transports: no `SendEmailMessage` holding an address or a signed link waits
+     * in the Messenger queue the application routes it to.
+     */
+    private function assertNothingQueued(): void
+    {
+        self::assertQueuedEmailCount(0);
+        $queue = self::getContainer()->get('messenger.transport.async');
+        self::assertInstanceOf(InMemoryTransport::class, $queue);
+        self::assertSame([], $queue->getSent());
     }
 }

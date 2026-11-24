@@ -8,6 +8,7 @@ use LogicException;
 use Phil\BounceParser\Verp;
 use Phil\EmailAddress\Dns\StaticResolver;
 use Phil\EmailAddress\MailDomain;
+use Phil\NewsletterBundle\Application\ApprovalPolicy;
 use Phil\NewsletterBundle\Application\Campaigns;
 use Phil\NewsletterBundle\Application\Exception\NotFound;
 use Phil\NewsletterBundle\Application\Handler\DispatchDueCampaignsHandler;
@@ -36,6 +37,7 @@ use Phil\NewsletterBundle\Domain\Model\Campaign;
 use Phil\NewsletterBundle\Domain\Model\Delivery;
 use Phil\NewsletterBundle\Domain\Model\MailingList;
 use Phil\NewsletterBundle\Domain\Model\Membership;
+use Phil\NewsletterBundle\Domain\Model\SendRun;
 use Phil\NewsletterBundle\Domain\Model\Subscriber;
 use Phil\NewsletterBundle\Domain\Model\Template;
 use Phil\NewsletterBundle\Domain\ValueObject\SendWindow;
@@ -48,6 +50,7 @@ use Psr\Log\AbstractLogger;
 use Stringable;
 use Symfony\Component\Mailer\Exception\TransportExceptionInterface;
 use Symfony\Component\Mailer\Header\MetadataHeader;
+use Symfony\Component\Mailer\Header\TrackingHeader;
 use Symfony\Component\Messenger\Stamp\DelayStamp;
 use Symfony\Component\Mime\Email;
 
@@ -83,7 +86,7 @@ final class SendingTest extends TestCase
         $this->newsletter->campaigns->save($campaign);
 
         $this->campaigns()->sendNow($campaign);
-        self::assertEquals([new SendCampaign('c1')], $this->newsletter->bus->messages(SendCampaign::class));
+        self::assertEquals([new SendCampaign('c1', SendRun::idFor('c1', 1))], $this->newsletter->bus->messages(SendCampaign::class));
         $this->campaignHandler()(new SendCampaign('c1'));
         $this->campaignHandler()(new SendCampaign('c1'));
 
@@ -120,7 +123,13 @@ final class SendingTest extends TestCase
         self::assertStringNotContainsString('href="https://example.com/news"', $html);
         self::assertStringContainsString('mailto:a@example.com', $html);
         self::assertStringContainsString('https://example.com/newsletter/preferences/', $html);
-        self::assertStringContainsString('News', (string) $email->getTextBody());
+        $text = (string) $email->getTextBody();
+        self::assertStringContainsString('News', $text);
+        self::assertStringContainsString('<'.substr((string) $headers->get('List-Unsubscribe')?->getBodyAsString(), 1, -1).'>', $text);
+        self::assertMatchesRegularExpression('#Your preferences <https://example\.com/newsletter/preferences/[A-Za-z0-9_.-]+>#', $text);
+        $tracking = $headers->get(TrackingHeader::NAME);
+        self::assertInstanceOf(TrackingHeader::class, $tracking);
+        self::assertSame([false, false], [$tracking->getOpens(), $tracking->getClicks()]);
 
         $link = $this->newsletter->links->verify($this->token('#/unsubscribe/([A-Za-z0-9_.-]+)>#', (string) $headers->get('List-Unsubscribe')?->getBodyAsString()), LinkPurpose::Unsubscribe);
         self::assertSame([$subscriber->id, $list->id, null], [$link->subject, $link->extra, $link->expiresAt]);
@@ -308,7 +317,7 @@ final class SendingTest extends TestCase
         self::assertSame([], $this->newsletter->bus->messages(SendCampaign::class));
         $this->newsletter->clock->modify('+1 hour');
         $handler(new DispatchDueCampaigns());
-        self::assertEquals([new SendCampaign('early')], $this->newsletter->bus->messages(SendCampaign::class));
+        self::assertEquals([new SendCampaign('early', SendRun::idFor('early', 1))], $this->newsletter->bus->messages(SendCampaign::class));
         self::assertSame(CampaignStatus::Sending, $this->newsletter->campaigns->get('early')?->status);
         self::assertSame(0, $this->campaigns()->startDue());
         self::assertSame(CampaignStatus::Scheduled, $this->campaigns()->get('late')->status);
@@ -335,6 +344,27 @@ final class SendingTest extends TestCase
         iterator_to_array(new ListRecipients($this->newsletter->subscribers)->recipients(new Campaign('c2', Site::default(), $list->id, 'Hello', 'Hi', segment: 'vip'), $this->newsletter->clock->now()));
     }
 
+    public function testATransportFailureFailsTheConfirmationForMessengerToRetry(): void
+    {
+        $list = $this->newsletter->list();
+        $this->newsletter->subscriptions->subscribe($list, 'ada@example.com');
+        $ada = $this->newsletter->subscribers->byEmail(Site::default(), 'ada@example.com');
+        self::assertInstanceOf(Subscriber::class, $ada);
+        $mailer = $this->newsletter->mailer;
+        $mailer->failures = 1;
+
+        try {
+            $this->confirmationHandler()(new SendConfirmation($ada->id, $list->id));
+            self::fail('Expected a transport failure.');
+        } catch (TransportExceptionInterface $transportException) {
+            self::assertSame('The transport is down.', $transportException->getMessage());
+        }
+
+        self::assertCount(0, $this->newsletter->mailer->sent);
+        $this->confirmationHandler()(new SendConfirmation($ada->id, $list->id));
+        self::assertSame(['ada@example.com'], array_map(static fn (Email $email): string => $email->getTo()[0]->getAddress(), $mailer->sent));
+    }
+
     public function testTheConfirmationOfADoubleOptIn(): void
     {
         $list = $this->newsletter->list();
@@ -349,10 +379,13 @@ final class SendingTest extends TestCase
         self::assertFalse($email->getHeaders()->has('Precedence'));
         $link = $this->newsletter->links->verify($this->token('#/confirm/([A-Za-z0-9_.-]+)"#', (string) $email->getHtmlBody()), LinkPurpose::Confirm);
         self::assertSame([$ada->id, $list->id, $this->newsletter->clock->now()->getTimestamp() + 604_800], [$link->subject, $link->extra, $link->expiresAt]);
+        self::assertMatchesRegularExpression('#<https://example\.com/newsletter/confirm/[A-Za-z0-9_.-]+>#', (string) $email->getTextBody());
+        self::assertSame('opens=false; clicks=false', $email->getHeaders()->get(TrackingHeader::NAME)?->getBodyAsString());
 
         $this->newsletter->templates->save(new Template('confirmation', Site::default(), 'Please confirm {{ list_name }}', '<a href="{{ confirm_url }}">Yes</a>', $this->newsletter->clock->now()));
         $this->confirmationHandler()(new SendConfirmation($ada->id, $list->id));
         self::assertSame('Please confirm The news', $this->newsletter->mailer->sent[1]->getSubject());
+        self::assertMatchesRegularExpression('#^Yes <https://example\.com/newsletter/confirm/[A-Za-z0-9_.-]+>$#', (string) $this->newsletter->mailer->sent[1]->getTextBody());
 
         $this->newsletter->subscriptions->confirm($ada->id, $list->id);
         $this->confirmationHandler()(new SendConfirmation($ada->id, $list->id));
@@ -491,12 +524,12 @@ final class SendingTest extends TestCase
 
     private function campaigns(): Campaigns
     {
-        return new Campaigns($this->newsletter->campaigns, $this->newsletter->deliveries, $this->newsletter->engagement, $this->newsletter->bus, $this->newsletter->clock);
+        return new Campaigns($this->newsletter->campaigns, $this->newsletter->deliveries, $this->newsletter->engagement, $this->newsletter->bus, $this->newsletter->clock, $this->newsletter->sendRuns(), new ApprovalPolicy(required: false));
     }
 
     private function campaignHandler(): SendCampaignHandler
     {
-        return new SendCampaignHandler($this->newsletter->campaigns, $this->newsletter->deliveries, new ListRecipients($this->newsletter->subscribers), $this->newsletter->bus, $this->newsletter->clock);
+        return new SendCampaignHandler($this->newsletter->campaigns, $this->newsletter->deliveries, new ListRecipients($this->newsletter->subscribers), $this->newsletter->bus, $this->newsletter->clock, $this->newsletter->sendRuns(), false);
     }
 
     private function profiles(): SenderProfiles

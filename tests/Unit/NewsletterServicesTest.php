@@ -4,15 +4,23 @@ declare(strict_types=1);
 
 namespace Phil\NewsletterBundle\Tests\Unit;
 
+use ArrayObject;
 use Phil\EmailAddress\EmailValidator;
 use Phil\Markup\Markup;
+use Phil\NewsletterBundle\Application\ApprovalPolicy;
 use Phil\NewsletterBundle\Application\Bounces\BounceHandler;
 use Phil\NewsletterBundle\Application\Contract\BounceMailbox;
 use Phil\NewsletterBundle\Application\Contract\ConfirmationThrottle;
 use Phil\NewsletterBundle\Application\Contract\SendThrottle;
 use Phil\NewsletterBundle\Application\Handler\DeliverAudienceWebhookHandler;
+use Phil\NewsletterBundle\Application\Handler\SendCampaignHandler;
+use Phil\NewsletterBundle\Application\NewsletterKey;
+use Phil\NewsletterBundle\Application\Sending\MessageComposer;
+use Phil\NewsletterBundle\Application\SendRuns;
 use Phil\NewsletterBundle\Application\Subscriptions;
 use Phil\NewsletterBundle\Application\Tracking\ClickTracker;
+use Phil\NewsletterBundle\Domain\Contract\SuppressionRepository;
+use Phil\NewsletterBundle\Domain\ValueObject\BreakerPolicy;
 use Phil\NewsletterBundle\Infrastructure\Dbal\NewsletterSchemaListener;
 use Phil\NewsletterBundle\Infrastructure\DependencyInjection\NewsletterServices;
 use Phil\NewsletterBundle\Infrastructure\Http\SubscriptionController;
@@ -63,6 +71,8 @@ final class NewsletterServicesTest extends TestCase
         'subscription' => ['rate_limit' => ['per_ip' => ['limit' => 20, 'interval' => '30 minutes'], 'per_address' => ['limit' => 2, 'interval' => '1 day'], 'resend_delay' => '15 minutes']],
         'webhooks' => ['crm' => ['url' => 'https://crm.example.com/hooks', 'events' => ['subscribed', 'unsubscribed']], 'all' => ['url' => 'https://all.example.com/hooks']],
         'preview_role' => 'ROLE_EDITOR',
+        'approval' => ['required' => false, 'role' => 'ROLE_EDITOR_IN_CHIEF', 'four_eyes' => true],
+        'circuit_breaker' => ['minimum' => 50, 'transport_failure_rate' => 20, 'bounce_rate' => 2.5, 'complaint_rate' => 0.1],
     ];
 
     public function testTheDefaultServices(): void
@@ -95,6 +105,17 @@ final class NewsletterServicesTest extends TestCase
         self::assertNull($off->getDefinition(SubscriptionController::class)->getArgument(8));
     }
 
+    public function testTheCircuitBreakerIsOnByDefaultAndTurnedOffExplicitly(): void
+    {
+        $breaker = $this->load([])->getDefinition(SendRuns::class)->getArgument(5);
+        self::assertInstanceOf(Definition::class, $breaker);
+        self::assertSame([BreakerPolicy::class, [100, 10.0, 5.0, 0.3]], [$breaker->getClass(), $breaker->getArguments()]);
+        self::assertNull($this->load(['circuit_breaker' => false])->getDefinition(SendRuns::class)->getArgument(5));
+        self::assertSame([true, 'ROLE_NEWSLETTER_APPROVER', false], $this->load([])->getDefinition(ApprovalPolicy::class)->getArguments());
+        self::assertTrue($this->load([])->getDefinition(SendCampaignHandler::class)->getArgument(6));
+        self::assertFalse($this->load(['approval' => ['required' => false]])->getDefinition(SendCampaignHandler::class)->getArgument(6));
+    }
+
     public function testADurationOfTheLimitsIsADuration(): void
     {
         foreach ([['per_ip' => ['interval' => 'soon']], ['per_address' => ['interval' => '0 seconds']], ['resend_delay' => '-5 minutes'], ['per_ip' => ['interval' => 'tomorrow']]] as $limits) {
@@ -107,6 +128,37 @@ final class NewsletterServicesTest extends TestCase
         }
 
         self::assertTrue($this->load(['subscription' => ['rate_limit' => ['resend_delay' => '1 second']]])->hasDefinition(NewsletterServices::SUBSCRIPTION_LIMITER));
+    }
+
+    public function testTheKeysOfEachUseAreDerivedFromTheValueTheEnvironmentGivesAtRunTime(): void
+    {
+        $container = $this->load(['secret' => '%env(NEWSLETTER_TEST_SECRET)%'] + self::FULL);
+        $runtime = new ContainerBuilder();
+        $keys = [];
+
+        foreach (['suppression' => $container->getDefinition(SuppressionRepository::class)->getArgument(2), 'verp' => $container->getDefinition(MessageComposer::class)->getArgument(1), 'bounces' => $container->getDefinition(BounceHandler::class)->getArgument(8)] as $name => $key) {
+            self::assertInstanceOf(Definition::class, $key);
+            self::assertSame([NewsletterKey::class, 'derive'], $key->getFactory());
+            self::assertSame(['%env(NEWSLETTER_TEST_SECRET)%', 'bounces' === $name ? 'verp' : $name], $key->getArguments());
+            $keys[$name] = $key;
+        }
+
+        $runtime->register('keys', ArrayObject::class)->setArguments([$keys])->setPublic(true);
+        $_SERVER['NEWSLETTER_TEST_SECRET'] = str_repeat('s', 32);
+
+        try {
+            $runtime->compile(true);
+            $derived = $runtime->get('keys');
+            self::assertInstanceOf(ArrayObject::class, $derived);
+
+            self::assertSame([
+                'suppression' => hash_hmac('sha256', 'suppression', str_repeat('s', 32)),
+                'verp' => hash_hmac('sha256', 'verp', str_repeat('s', 32)),
+                'bounces' => hash_hmac('sha256', 'verp', str_repeat('s', 32)),
+            ], $derived->getArrayCopy());
+        } finally {
+            unset($_SERVER['NEWSLETTER_TEST_SECRET']);
+        }
     }
 
     public function testTheSchemaListenerNeedsTheDoctrineExtension(): void

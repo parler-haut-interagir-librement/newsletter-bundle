@@ -9,12 +9,14 @@ use Psr\Log\NullLogger;
 use Symfony\Bundle\FrameworkBundle\Kernel\MicroKernelTrait;
 use Symfony\Component\DependencyInjection\Loader\Configurator\ContainerConfigurator;
 use Symfony\Component\HttpKernel\Kernel;
+use Symfony\Component\Mailer\Messenger\SendEmailMessage;
 use Symfony\Component\Routing\Loader\Configurator\RoutingConfigurator;
 use Symfony\Component\Security\Core\User\InMemoryUser;
 
 /**
  * An application as small as the bundle needs: FrameworkBundle with the mailer on the null transport, Messenger
- * handling every message at once, CSRF tokens and the translator, DoctrineBundle on SQLite, TwigBundle, Symfony
+ * handling every message at once but `SendEmailMessage`, routed to an asynchronous transport in memory as an
+ * application that queues its emails does, CSRF tokens and the translator, DoctrineBundle on SQLite, TwigBundle, Symfony
  * Security with an administrator signing in by HTTP Basic, and the newsletter of the site `example.com`.
  */
 final class TestKernel extends Kernel
@@ -57,7 +59,10 @@ final class TestKernel extends Kernel
             'csrf_protection' => true,
             'session' => ['storage_factory_id' => 'session.storage.factory.mock_file'],
             'mailer' => ['dsn' => 'null://null'],
-            'messenger' => null,
+            'messenger' => [
+                'transports' => ['async' => 'in-memory://'],
+                'routing' => [SendEmailMessage::class => 'async'],
+            ],
             'scheduler' => null,
             'rate_limiter' => null,
             'cache' => ['app' => 'cache.adapter.array'],
@@ -72,6 +77,7 @@ final class TestKernel extends Kernel
             'providers' => ['people' => ['memory' => ['users' => [
                 'admin' => ['password' => 'admin', 'roles' => ['ROLE_ADMIN']],
                 'reader' => ['password' => 'reader', 'roles' => ['ROLE_USER']],
+                'editor' => ['password' => 'editor', 'roles' => ['ROLE_NEWSLETTER_APPROVER']],
             ]]]],
             'firewalls' => ['main' => ['http_basic' => null, 'provider' => 'people']],
         ]);
@@ -80,6 +86,7 @@ final class TestKernel extends Kernel
             'sites' => ['default' => ['base_url' => 'https://example.com']],
             'profiles' => ['default' => ['from' => 'news@example.com', 'from_name' => 'Example']],
             'bounces' => ['verp' => ['domain' => 'example.com'], 'remote_event_consumer' => 'mail_provider'],
+            'approval' => ['four_eyes' => true],
         ]);
         $container->services()->alias('test.connection', 'doctrine.dbal.default_connection')->public();
     }

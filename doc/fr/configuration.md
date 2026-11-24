@@ -1,4 +1,4 @@
-<!-- phil-dev source-sha256=8ad380117a9cb4fbd8cebfe94fa2d99d2e3fa2af995bf2e6b0e65dc62527fded -->
+<!-- phil-dev source-sha256=8e7d44cb04ea30f34effbd8517f54e71f10b98330977ebc583a2ae9e00f6b976 -->
 # Configuration
 
 La configuration du bundle se trouve sous `phil_newsletter` :
@@ -40,12 +40,21 @@ phil_newsletter:
     webhooks:
         crm: { url: 'https://crm.example.com/hooks/newsletter', events: [confirmed, unsubscribed] }
     preview_role: ROLE_EDITOR
+    approval:
+        required: true
+        role: ROLE_NEWSLETTER_APPROVER
+        four_eyes: true
+    circuit_breaker:            # "circuit_breaker: false" turns it off
+        minimum: 100
+        transport_failure_rate: 10
+        bounce_rate: 5
+        complaint_rate: 0.3
 ```
 
 | Option | Valeur par défaut | Ce qu'elle fait |
 |---|---|---|
 | `enabled` | `true` | Enregistre les services du bundle ; `false` n'en enregistre aucun. |
-| `secret` | `%kernel.secret%` | La clé des liens signés, des étiquettes VERP et des empreintes de suppression : au moins 16 octets. Une nouvelle clé casse les liens de chaque message envoyé. |
+| `secret` | `%kernel.secret%` | La clé des liens signés, des étiquettes VERP et des empreintes de suppression : au moins 16 octets, jamais un substitut qui commence par `change-me` ou `changeme`. Les clés des étiquettes VERP et des empreintes de suppression sont dérivées de sa valeur à l'exécution, une variable d'environnement comprise. Une nouvelle clé casse les liens de chaque message envoyé. |
 | `connection` | `doctrine.dbal.default_connection` | La connexion DBAL des tables. |
 | `check_mail_domain` | `true` | Si le worker qui envoie la confirmation d'une double confirmation demande d'abord au DNS que le domaine de l'adresse reçoit du courriel, et refuse l'abonnement sinon ; la requête n'attend jamais le DNS. |
 | `site` | `default` | Le site d'une application autonome. |
@@ -64,6 +73,14 @@ phil_newsletter:
 | `subscription.rate_limit.resend_delay` | `5 minutes` | Le délai avant qu'une autre confirmation soit envoyée au même abonné. |
 | `webhooks.<name>` | aucun | Les récepteurs des événements d'audience ; un `events` vide les envoie tous. Exige `phil/standard-webhooks-bundle`. |
 | `preview_role` | `ROLE_ADMIN` | Le rôle auquel répond l'aperçu de l'éditeur. |
+| `approval.required` | `true` | Si une campagne n'est envoyée, ou démarrée à son heure, qu'une fois approuvée. Voir [Approbation](campaigns.md#approbation). |
+| `approval.role` | `ROLE_NEWSLETTER_APPROVER` | Le rôle qui approuve les campagnes. |
+| `approval.four_eyes` | `false` | Si l'approbateur doit être quelqu'un d'autre que l'auteur de la campagne. |
+| `circuit_breaker.enabled` | `true` | Met en pause une exécution d'envoi dont les échecs de transport, les rebonds ou les plaintes montent ; `circuit_breaker: false` le désactive. Voir [Les exécutions d'envoi et le disjoncteur](campaigns.md#les-exécutions-denvoi-et-le-disjoncteur). |
+| `circuit_breaker.minimum` | `100` | Les messages tentés, depuis le démarrage ou la reprise de l'exécution, avant que les parts soient lues. |
+| `circuit_breaker.transport_failure_rate` | `10` | La part des tentatives que le transport de courriel a refusées, en pourcentage, au-delà de laquelle l'exécution se met en pause. |
+| `circuit_breaker.bounce_rate` | `5` | La part des messages envoyés qui ont rebondi, en pourcentage, au-delà de laquelle l'exécution se met en pause. |
+| `circuit_breaker.complaint_rate` | `0.3` | La part des messages envoyés signalés comme pourriel, en pourcentage, au-delà de laquelle l'exécution se met en pause. |
 
 Chaque profil :
 

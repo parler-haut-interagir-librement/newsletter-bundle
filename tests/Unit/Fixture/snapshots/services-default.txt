@@ -36,6 +36,12 @@ Phil\Markup\Markup
           0 => 'Phil\\Markup\\Adapter\\SanitizerPurifier'
           1 => 'defaultPolicies'
         ]
+Phil\NewsletterBundle\Application\ApprovalPolicy
+  class: (none)
+  public: no
+  argument 0: true
+  argument 1: 'ROLE_NEWSLETTER_APPROVER'
+  argument 2: false
 Phil\NewsletterBundle\Application\Bounces\BounceHandler
   class: (none)
   public: no
@@ -50,8 +56,17 @@ Phil\NewsletterBundle\Application\Bounces\BounceHandler
   argument 5: @Phil\NewsletterBundle\Application\Contract\CurrentSite
   argument 6: @clock
   argument 7: NULL
-  argument 8: 'ec447a12f47823921d0c5f96167726d703a9e307da4a34370d1d6639c25a66ce'
+  argument 8: inline
+      class: string
+      public: no
+      factory: [
+          0 => 'Phil\\NewsletterBundle\\Application\\NewsletterKey'
+          1 => 'derive'
+        ]
+      argument 0: '%kernel.secret%'
+      argument 1: 'verp'
   argument 9: 3
+  argument 10: @Phil\NewsletterBundle\Application\SendRuns
 Phil\NewsletterBundle\Application\Campaigns
   class: (none)
   public: no
@@ -60,6 +75,11 @@ Phil\NewsletterBundle\Application\Campaigns
   argument 2: @Phil\NewsletterBundle\Domain\Contract\EngagementRepository
   argument 3: @messenger.default_bus
   argument 4: @clock
+  argument 5: @Phil\NewsletterBundle\Application\SendRuns
+  argument 6: @Phil\NewsletterBundle\Application\ApprovalPolicy
+  argument 7: @security.authorization_checker (null on invalid)
+  argument 8: @security.token_storage (null on invalid)
+  argument 9: @event_dispatcher
 Phil\NewsletterBundle\Application\Content\ContentRenderer
   class: (none)
   public: no
@@ -117,6 +137,8 @@ Phil\NewsletterBundle\Application\Handler\SendCampaignHandler
   argument 2: @Phil\NewsletterBundle\Application\Contract\SegmentResolver
   argument 3: @messenger.default_bus
   argument 4: @clock
+  argument 5: @Phil\NewsletterBundle\Application\SendRuns
+  argument 6: true
 Phil\NewsletterBundle\Application\Handler\SendConfirmationHandler
   class: (none)
   public: no
@@ -132,7 +154,7 @@ Phil\NewsletterBundle\Application\Handler\SendConfirmationHandler
   argument 6: @Phil\NewsletterBundle\Application\Content\ContentRenderer
   argument 7: @Phil\NewsletterBundle\Application\Sending\MessageComposer
   argument 8: @twig
-  argument 9: @mailer.mailer
+  argument 9: @mailer.transports
   argument 10: @clock
   argument 11: @phil_newsletter.mail_domains
   argument 12: @logger (null on invalid)
@@ -155,19 +177,43 @@ Phil\NewsletterBundle\Application\Handler\SendDeliveryHandler
   argument 10: @Phil\NewsletterBundle\Application\Tracking\ClickTracker
   argument 11: @Phil\NewsletterBundle\Application\SignedLinks
   argument 12: @Phil\NewsletterBundle\Application\NewsletterUrls
-  argument 13: @mailer.mailer
+  argument 13: @mailer.transports
   argument 14: @messenger.default_bus
   argument 15: @clock
+  argument 16: @Phil\NewsletterBundle\Application\SendRuns
 Phil\NewsletterBundle\Application\NewsletterUrls
   class: (none)
   public: no
   argument 0: @router
   argument 1: []
+Phil\NewsletterBundle\Application\SendRuns
+  class: (none)
+  public: no
+  argument 0: @Phil\NewsletterBundle\Domain\Contract\SendRunRepository
+  argument 1: @Phil\NewsletterBundle\Domain\Contract\DeliveryRepository
+  argument 2: @messenger.default_bus
+  argument 3: @event_dispatcher
+  argument 4: @clock
+  argument 5: inline
+      class: Phil\NewsletterBundle\Domain\ValueObject\BreakerPolicy
+      public: no
+      argument 0: 100
+      argument 1: 10.0
+      argument 2: 5.0
+      argument 3: 0.3
 Phil\NewsletterBundle\Application\Sending\MessageComposer
   class: (none)
   public: no
   argument 0: NULL
-  argument 1: 'ec447a12f47823921d0c5f96167726d703a9e307da4a34370d1d6639c25a66ce'
+  argument 1: inline
+      class: string
+      public: no
+      factory: [
+          0 => 'Phil\\NewsletterBundle\\Application\\NewsletterKey'
+          1 => 'derive'
+        ]
+      argument 0: '%kernel.secret%'
+      argument 1: 'verp'
 Phil\NewsletterBundle\Application\Sending\SenderProfiles
   class: (none)
   public: no
@@ -217,6 +263,10 @@ Phil\NewsletterBundle\Domain\Contract\MailingListRepository
   class: Phil\NewsletterBundle\Infrastructure\Dbal\DbalMailingListRepository
   public: no
   argument 0: @doctrine.dbal.default_connection
+Phil\NewsletterBundle\Domain\Contract\SendRunRepository
+  class: Phil\NewsletterBundle\Infrastructure\Dbal\DbalSendRunRepository
+  public: no
+  argument 0: @doctrine.dbal.default_connection
 Phil\NewsletterBundle\Domain\Contract\SubscriberRepository
   class: Phil\NewsletterBundle\Infrastructure\Dbal\DbalSubscriberRepository
   public: no
@@ -226,7 +276,15 @@ Phil\NewsletterBundle\Domain\Contract\SuppressionRepository
   public: no
   argument 0: @doctrine.dbal.default_connection
   argument 1: @clock
-  argument 2: '22f973f73d5a9f2b8aad00ea43e8e0c1f9afc525c1a91a339ffe81ee5a542af9'
+  argument 2: inline
+      class: string
+      public: no
+      factory: [
+          0 => 'Phil\\NewsletterBundle\\Application\\NewsletterKey'
+          1 => 'derive'
+        ]
+      argument 0: '%kernel.secret%'
+      argument 1: 'suppression'
 Phil\NewsletterBundle\Domain\Contract\TemplateRepository
   class: Phil\NewsletterBundle\Infrastructure\Dbal\DbalTemplateRepository
   public: no
