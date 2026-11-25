@@ -4,6 +4,16 @@ All notable changes to `phil/newsletter-bundle` will be documented in this file.
 
 Updates should follow the [Keep a CHANGELOG](https://keepachangelog.com/) principles.
 
+## 0.4.1-alpha - 2026-11-25
+
+### Security
+
+- Requires `twig/twig` 3.31.1 or later. Before it, the sandbox in which `SandboxedTemplates` renders the templates of
+  administrators and members let `join`, `first` and `last` read the public properties of an object of the context, and
+  an assignment, a test or a spread argument call `__toString()` without asking the policy (advisories of 2026-11-24).
+  The allowlist is unchanged; a test renders each of these against an object of the context and checks that nothing of
+  it comes out.
+
 ## 0.4.0-alpha - 2026-11-24
 
 A campaign is sent once approved, by default, and the tables gain a table, columns and
@@ -74,6 +84,10 @@ an index. See [Upgrading to 0.3](doc/campaigns.md#upgrading-to-03).
   VERP tags and its suppression hashes with a key known to everyone. The recipe writes the variable empty, with a
   comment on how to fill it, and `NewsletterKey::check()`, which `SignedLinks` calls, refuses a key that begins with
   `change-me` or `changeme`, as it refuses one shorter than 16 bytes.
+- The limiter of the subscriptions keyed its counts by the HMAC of the address, of the client and of the subscriber
+  under the secret itself, `%kernel.secret%` by default, the same hash other bundles kept for the same address.
+  `SubscriptionRateLimiter` derives its key by HKDF-SHA256 under `phil_newsletter.subscription_limiter`
+  (`SubscriptionRateLimiter::USAGE`). The counts start again at the update.
 
 ## 0.3.0-alpha - 2026-11-20
 
